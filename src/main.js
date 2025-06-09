@@ -11,10 +11,7 @@ const ChromaticAberrationShader = {
   },
   vertexShader: `
     varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-    }
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
   `,
   fragmentShader: `
     uniform sampler2D tDiffuse;
@@ -40,10 +37,7 @@ const GravityLensShader = {
   },
   vertexShader: `
     varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-    }
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
   `,
   fragmentShader: `
     uniform sampler2D tDiffuse;
@@ -63,6 +57,103 @@ const GravityLensShader = {
     }
   `
 };
+
+// === Vignette Shader ===
+const VignetteShader = {
+  uniforms: {
+    "tDiffuse": { value: null },
+    "offset": { value: 1.1 },
+    "darkness": { value: 1.5 },
+    "opacity": { value: 0.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float offset;
+    uniform float darkness;
+    uniform float opacity;
+    varying vec2 vUv;
+    void main() {
+      vec4 color = texture2D(tDiffuse, vUv);
+      float dist = distance(vUv, vec2(0.5,0.5));
+      float vignette = smoothstep(offset, 0.8, dist);
+      color.rgb = mix(color.rgb, color.rgb * (1.0 - darkness * vignette * opacity), opacity);
+      gl_FragColor = color;
+    }
+  `
+};
+
+let hasCollided = false;
+
+// === AUDIO IN UTERO ===
+const audio = new Audio('/assets/inutero.mp3');
+audio.loop = true;
+
+// Web AudioContext (pour mix immersif et fade doux)
+let ctx, source, gainNode, filterNode;
+let audioStarted = false;
+let targetGain = 1.0, currentGain = 1.0, fading = false;
+
+// Audio init
+function startAudio() {
+  if (audioStarted) return;
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  source = ctx.createMediaElementSource(audio);
+  gainNode = ctx.createGain();
+  filterNode = ctx.createBiquadFilter();
+  filterNode.type = 'lowpass';
+  filterNode.frequency.value = 10000;
+
+  source.connect(filterNode).connect(gainNode).connect(ctx.destination);
+  gainNode.gain.value = 0.7; // volume de base, tu peux augmenter/diminuer
+  currentGain = 0.7;
+  targetGain = 0.7;
+
+  audio.play();
+  audioStarted = true;
+}
+
+// Intensité immersive, lissage doux (utilisé dans animate)
+function setAudioIntensity(intensity) {
+  if (!audioStarted) return;
+  // Clamp intensity entre 0 et 1.2 max pour booster un peu si besoin
+  intensity = Math.max(0, Math.min(1.2, intensity));
+  targetGain = 0.13 + 0.95 * intensity; // ajuste ce que tu veux (min/max)
+
+  // Effet compression sonore, effet "enfermement" in utero
+  filterNode.frequency.value = 800 + 8000 * (1 - intensity);
+
+  // On ne set plus directement le gain, on fait un lissage progressif
+}
+
+// Fade out lissé sur plusieurs frames
+function fadeOutAudio(duration = 1900) {
+  if (!audioStarted || fading) return;
+  fading = true;
+  const start = currentGain;
+  const startTime = performance.now();
+  function step(now) {
+    const elapsed = now - startTime;
+    const t = Math.min(1, elapsed / duration);
+    currentGain = start * (1 - t);
+    gainNode.gain.value = currentGain;
+    if (t < 1) requestAnimationFrame(step);
+    else {
+      audio.pause();
+      audioStarted = false;
+      fading = false;
+      gainNode.gain.value = 0;
+      currentGain = 0;
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+// On démarre l’audio à la première touche
+window.addEventListener('keydown', startAudio, { once: true });
 
 // === SCÈNE, CAMERA, RENDERER ===
 const scene = new THREE.Scene();
@@ -93,7 +184,7 @@ const sphere = new THREE.Mesh(
     opacity: 0.4,
   })
 );
-sphere.position.set(0, 0, 500)
+sphere.position.set(0, 0, 1000);
 scene.add(sphere);
 
 // === VORTEX TROU NOIR ===
@@ -144,74 +235,98 @@ scene.add(particles);
 let camTarget = new THREE.Vector3();
 let camLag = 0.13;
 
-// === MOUVEMENTS BOULE DE DATA ===
-let velocity = { x: 0, z: 0 };
-let target = { x: 0, z: 0 };
-const accel = 0.07;
-const friction = 0.987;
-const maxSpeed = 0.54;
+// === BOULE VITESSE & INPUT ===
+let sphereVelocity = new THREE.Vector3(0, 0, 0);
+const playerAccel = 0.13;
+const friction = 0.992;
+const maxSpeed = 1.35;
+
+let moveTarget = { x: 0, z: 0 };
 
 document.addEventListener("keydown", (e) => {
-  if (e.code === "ArrowLeft") target.x = -maxSpeed;
-  if (e.code === "ArrowRight") target.x = maxSpeed;
-  if (e.code === "ArrowUp") target.z = -maxSpeed;
-  if (e.code === "ArrowDown") target.z = maxSpeed;
+  if (e.code === "ArrowLeft") moveTarget.x = -1;
+  if (e.code === "ArrowRight") moveTarget.x = 1;
+  if (e.code === "ArrowUp") moveTarget.z = -1;
+  if (e.code === "ArrowDown") moveTarget.z = 1;
 });
 document.addEventListener("keyup", (e) => {
-  if (["ArrowLeft", "ArrowRight"].includes(e.code)) target.x = 0;
-  if (["ArrowUp", "ArrowDown"].includes(e.code)) target.z = 0;
+  if (["ArrowLeft", "ArrowRight"].includes(e.code)) moveTarget.x = 0;
+  if (["ArrowUp", "ArrowDown"].includes(e.code)) moveTarget.z = 0;
 });
 
-// === POST-PROCESSING COMPOSER & PASSES ===
+// === POST-PROCESSING ===
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const lensPass = new ShaderPass(GravityLensShader);
 composer.addPass(lensPass);
-
 const chromaPass = new ShaderPass(ChromaticAberrationShader);
 composer.addPass(chromaPass);
+const vignettePass = new ShaderPass(VignetteShader);
+composer.addPass(vignettePass);
 
 // === ANIMATION PRINCIPALE ===
 function animate(time) {
-  // Boule bleue : pulsation et mouvement
+  // Visuel boule : pulsation
   const scale = 1 + 0.09 * Math.sin(time * 0.002);
   sphere.scale.set(scale, scale, scale);
   sphere.rotation.y += 0.004;
 
-  // Mouvement manuel avec les flèches
-  velocity.x += (target.x - velocity.x) * accel;
-  velocity.z += (target.z - velocity.z) * accel;
-  velocity.x *= friction;
-  velocity.z *= friction;
-  sphere.position.x += velocity.x;
-  sphere.position.z += velocity.z;
-
-  // === ATTRACTION GRAVITATIONNELLE DE LA SPHÈRE ===
+  // --- Gravité newtonienne pure + bruit ---
   const toVortex = vortexCore.position.clone().sub(sphere.position);
   const dist = toVortex.length();
+  const dirToVortex = toVortex.normalize();
 
-  let gravitationalForce = Math.max(0.008, Math.min(0.035, 0.006 + 0.09 / (dist * dist)));
-  if (dist < 30) gravitationalForce *= 1.3;
-  const gravityDirection = toVortex.normalize();
-  sphere.position.addScaledVector(gravityDirection, gravitationalForce);
+  // --- AUDIO : Intensité du son suivant la proximité
+  let intensity = 2 - Math.min(1, dist / 160);
+  setAudioIntensity(intensity);
 
-  if (dist < 25) {
-    sphere.material.opacity = 0.77;
-    sphere.material.emissive.setHSL(Math.random(), 0.7, 0.49);
-  } else {
-    sphere.material.opacity = 0.40;
-    sphere.material.emissive.setHex(0x001122);
+  // === Lissage volume audio chaque frame ===
+  if (audioStarted && !fading) {
+    // interpolation très douce pour éviter tout saut sonore, même en cas de lag
+    currentGain += (targetGain - currentGain) * 0.04;
+    gainNode.gain.value = currentGain;
   }
 
-  if (dist < 4) {
-    sphere.position.set(
-      (Math.random() - 0.5) * 80,
-      (Math.random() - 0.5) * 40,
-      (Math.random() - 0.5) * 80 + 40
-    );
+  // -- Paramètre Newton "pur" --
+  let K = 5 + 1800 * Math.min(1, (dist - 10) / 400);
+  let gravStrength = K / (dist * dist);
+
+  // --- Bruit directionnel (petite incertitude) ---
+  const noiseAmplitude = 0.005 * Math.max(0.1, 1 - dist / 100);
+  const angle = Math.sin(time * 0.0017) * Math.PI * 2 + Math.cos(time * 0.00113);
+  const noise = new THREE.Vector3(
+    Math.sin(angle + 0.6) * noiseAmplitude,
+    Math.sin(angle - 0.3) * noiseAmplitude * 0.55,
+    Math.cos(angle + 0.3) * noiseAmplitude
+  );
+
+  sphereVelocity.addScaledVector(dirToVortex, gravStrength);
+  sphereVelocity.add(noise);
+
+  // Contrôle joueur (accélération X/Z, inertie)
+  const moveVec = new THREE.Vector3(moveTarget.x, 0, moveTarget.z).normalize().multiplyScalar(playerAccel);
+  if (moveTarget.x !== 0 || moveTarget.z !== 0) {
+    sphereVelocity.add(moveVec);
   }
 
-  // Particules : aspiration dynamique vers vortex
+  // Clamp vitesse
+  if (sphereVelocity.length() > maxSpeed) sphereVelocity.setLength(maxSpeed);
+
+  // Friction
+  sphereVelocity.multiplyScalar(friction);
+
+  // Update position
+  sphere.position.add(sphereVelocity);
+
+  // Engloutissement ?
+  if (!hasCollided && dist < 1) {
+    hasCollided = true;
+    fadeOutAudio();
+    console.log("Boule engloutie !");
+    // TODO : Transition visuelle/fondu
+  }
+
+  // --- PARTICULES ---
   const posAttr = geometry.getAttribute('position');
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     let x = posAttr.getX(i);
@@ -233,8 +348,11 @@ function animate(time) {
       velocities[i].set(0, 0, 0);
     }
     posAttr.setXYZ(i, p.x, p.y, p.z);
-    sizes[i] = 0.8 + Math.min(3.5, Math.max(0, 8 - d)) * 0.13;
-    alphas[i] = 0.11 + Math.max(0, 0.28 - d * 0.009);
+
+    const t = time * 0.001;
+    const phase = i * 0.07;
+    sizes[i] = 0.8 + Math.min(3.5, Math.max(0, 8 - d)) * 0.13 + 0.20 * Math.sin(t + phase);
+    alphas[i] = 0.11 + Math.max(0, 0.28 - d * 0.009) + 0.10 + 0.08 * Math.sin(phase * 3) * Math.sin(t * 0.9 + phase);
   }
   posAttr.needsUpdate = true;
   geometry.attributes.size.needsUpdate = true;
@@ -245,7 +363,7 @@ function animate(time) {
   camera.position.lerp(camTarget, camLag);
   camera.lookAt(sphere.position);
 
-  // === POST-PROCESS: update lens center & dynamic intensity ===
+  // --- POST-PROCESS ---
   const screenVortex = vortexCore.position.clone().project(camera);
   lensPass.uniforms.lensCenter.value.set(
     (screenVortex.x + 1) / 2,
@@ -253,9 +371,11 @@ function animate(time) {
   );
   lensPass.uniforms.strength.value = Math.max(0.14, 0.53 - dist * 0.035);
   lensPass.uniforms.radius.value = 0.18 + Math.max(0, 0.31 - dist * 0.014);
+  chromaPass.uniforms.amount.value = dist < 10 ? 0.005 : 0.0006;
 
-  // Chromatic aberration dynamique selon distance (effet fort que très proche)
-  chromaPass.uniforms.amount.value = dist < 10 ? 0.002 : 0.0006;
+  let maxDist = 7, minDist = 0;
+  let vignetteStrength = 1 - Math.min(1, Math.max(0, (dist - minDist) / (maxDist - minDist)));
+  vignettePass.uniforms.opacity.value = vignetteStrength * 0.92;
 
   composer.render();
   requestAnimationFrame(animate);
